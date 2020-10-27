@@ -218,8 +218,8 @@ describe('E2EE Context', () => {
 
                     // An audio frame will have an overhead of 6 bytes with this counter and key size:
                     //   4 bytes truncated signature, counter (1 byte) and 1 byte trailer.
-                    // In addition to that we have the 132 bytes signature.
-                    expect(data.byteLength).toEqual(audioBytes.length + 6 + 132);
+                    // In addition to that we have the 132 bytes signature and a one byte counter field.
+                    expect(data.byteLength).toEqual(audioBytes.length + 6 + 1 + 132);
 
                     // TODO: provide test vector for the signature.
                     done();
@@ -275,7 +275,7 @@ describe('E2EE Context', () => {
         });
 
 
-        it('signs subsequent frames from the same source', async done => {
+        it('does not sign subsequent frames from the same source', async done => {
             let frameCount = 0;
 
             sendController = {
@@ -283,7 +283,11 @@ describe('E2EE Context', () => {
                     frameCount++;
                     const data = new Uint8Array(encodedFrame.data);
 
-                    expect(data[data.byteLength - 1] & 0x80).toEqual(0x80);
+                    if (frameCount === 1) {
+                        expect(data[data.byteLength - 1] & 0x80).toEqual(0x80);
+                    } else {
+                        expect(data[data.byteLength - 1] & 0x80).toEqual(0x00);
+                    }
 
                     if (frameCount === 2) {
                         done();

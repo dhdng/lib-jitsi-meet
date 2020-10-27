@@ -70,6 +70,7 @@ export class Context {
 
         this._signatureKey = null;
         this._signatureOptions = null;
+        this._frameSignatures = new Map();
     }
 
     /**
@@ -101,6 +102,7 @@ export class Context {
     _setKeys(keys) {
         this._cryptoKeyRing[this._currentKeyIndex] = keys;
         this._sendCount = BigInt(0); // eslint-disable-line new-cap
+        this._frameSignatures.clear();
     }
 
     /**
@@ -123,12 +125,22 @@ export class Context {
      * @returns {boolean}
      * @private
      */
-    _shouldSignFrame() {
+    _shouldSignFrame(encodedFrame) {
         if (!this._signatureKey) {
             return false;
         }
+        if (encodedFrame.type === 'key') {
+            return true;
+        }
 
-        return true;
+        const ssrc = encodedFrame.getMetadata().synchronizationSource;
+
+        if (!this._frameSignatures.has(ssrc)) {
+            return true;
+        }
+
+        // TODO: variable for audio and video?
+        return this._frameSignatures.get(ssrc).length > 30;
     }
 
     /**
@@ -154,6 +166,7 @@ export class Context {
      */
     encodeFunction(encodedFrame, controller) {
         const keyIndex = this._currentKeyIndex;
+        const ssrc = encodedFrame.getMetadata().synchronizationSource;
 
         if (this._cryptoKeyRing[keyIndex]) {
             this._sendCount++;
@@ -185,7 +198,11 @@ export class Context {
             // If a signature is included, the S bit is set and a fixed number
             // of bytes (depending on the signature algorithm) is inserted between
             // CTR and the trailing byte.
-            const signatureLength = this._shouldSignFrame(encodedFrame) ? this._signatureOptions.byteLength : 0;
+            const signatureLength = this._shouldSignFrame(encodedFrame)
+                ? this._signatureOptions.byteLength + 1
+                    + ((this._frameSignatures.get(ssrc) || []).length * DIGEST_LENGTH[encodedFrame.type])
+                : 0;
+
             const frameTrailer = new Uint8Array(counterLength + signatureLength + 1);
 
             frameTrailer.set(new Uint8Array(counter.buffer, counter.byteLength - counterLength));
@@ -233,10 +250,37 @@ export class Context {
 
                     // Sign with the long-term signature key.
                     if (signatureLength) {
+                        const numberOfOldTags = this._frameSignatures.has(ssrc)
+                            ? this._frameSignatures.get(ssrc).length
+                            : 0;
+                        const signatureData = new Uint8Array(
+                            (numberOfOldTags * DIGEST_LENGTH[encodedFrame.type]) + truncatedAuthTag.byteLength);
+
+                        signatureData.set(truncatedAuthTag, 0);
+                        let offset = truncatedAuthTag.byteLength;
+
+                        for (const oldAuthTag of this._frameSignatures.get(ssrc) || []) {
+                            signatureData.set(oldAuthTag, offset);
+                            offset += oldAuthTag.byteLength;
+                        }
+
+                        this._frameSignatures.set(ssrc, []);
+
                         const signature = await crypto.subtle.sign(this._signatureOptions,
-                            this._signatureKey, truncatedAuthTag);
+                            this._signatureKey, signatureData);
 
                         newUint8.set(new Uint8Array(signature), newUint8.byteLength - signature.byteLength - 1);
+
+                        // This count excludes the new authentication tag (which is always there)
+                        newUint8[newUint8.byteLength - signature.byteLength - 1 - 1] = numberOfOldTags;
+
+                        // Effectively we overwrite the truncated authentication tag with itself.
+                        newUint8.set(signatureData, UNENCRYPTED_BYTES[encodedFrame.type] + cipherText.byteLength);
+                    } else {
+                        if (!this._frameSignatures.has(ssrc)) {
+                            this._frameSignatures.set(ssrc, []);
+                        }
+                        this._frameSignatures.get(ssrc).push(truncatedAuthTag);
                     }
                     encodedFrame.data = newData;
 
@@ -270,7 +314,10 @@ export class Context {
         if (this._cryptoKeyRing[keyIndex]) {
             const counterLength = 1 + ((data[encodedFrame.data.byteLength - 1] >> 4) & 0x7);
             const signatureLength = data[encodedFrame.data.byteLength - 1] & 0x80
-                ? this._signatureOptions.byteLength : 0;
+                ? this._signatureOptions.byteLength + 1
+                    + (data[encodedFrame.data.byteLength - 1 - this._signatureOptions.byteLength - 1]
+                        * DIGEST_LENGTH[encodedFrame.type])
+                : 0;
             const frameHeader = new Uint8Array(encodedFrame.data, 0, UNENCRYPTED_BYTES[encodedFrame.type]);
 
             // Extract the truncated authentication tag.
@@ -282,9 +329,12 @@ export class Context {
             // Verify the long-term signature of the authentication tag.
             if (signatureLength) {
                 if (this._signatureKey) {
-                    const signature = data.subarray(data.byteLength - signatureLength - 1, data.byteLength - 1);
+                    const signatureData = data.subarray(
+                        data.byteLength - signatureLength - 1 - DIGEST_LENGTH[encodedFrame.type] - 1,
+                        data.byteLength - 1 - this._signatureOptions.byteLength - 1 - 1);
+                    const signature = data.subarray(data.byteLength - signatureLength, data.byteLength - 1);
                     const validSignature = await crypto.subtle.verify(this._signatureOptions,
-                            this._signatureKey, signature, authTag);
+                            this._signatureKey, signature, signatureData);
 
                     if (!validSignature) {
                         // TODO: surface this to the app. We are encrypted but validation failed.
