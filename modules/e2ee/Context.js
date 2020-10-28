@@ -272,7 +272,7 @@ export class Context {
                         newUint8.set(new Uint8Array(signature), newUint8.byteLength - signature.byteLength - 1);
 
                         // This count excludes the new authentication tag (which is always there)
-                        newUint8[newUint8.byteLength - signature.byteLength - 1 - 1] = numberOfOldTags;
+                        newUint8[newUint8.byteLength - signature.byteLength - counterLength - 1] = numberOfOldTags;
 
                         // Effectively we overwrite the truncated authentication tag with itself.
                         newUint8.set(signatureData, UNENCRYPTED_BYTES[encodedFrame.type] + cipherText.byteLength);
@@ -315,7 +315,7 @@ export class Context {
             const counterLength = 1 + ((data[encodedFrame.data.byteLength - 1] >> 4) & 0x7);
             const signatureLength = data[encodedFrame.data.byteLength - 1] & 0x80
                 ? this._signatureOptions.byteLength + 1
-                    + (data[encodedFrame.data.byteLength - 1 - this._signatureOptions.byteLength - 1]
+                    + (data[encodedFrame.data.byteLength - this._signatureOptions.byteLength - counterLength - 1]
                         * DIGEST_LENGTH[encodedFrame.type])
                 : 0;
             const frameHeader = new Uint8Array(encodedFrame.data, 0, UNENCRYPTED_BYTES[encodedFrame.type]);
@@ -330,8 +330,8 @@ export class Context {
             if (signatureLength) {
                 if (this._signatureKey) {
                     const signatureData = data.subarray(
-                        data.byteLength - signatureLength - 1 - DIGEST_LENGTH[encodedFrame.type] - 1,
-                        data.byteLength - 1 - this._signatureOptions.byteLength - 1 - 1);
+                        data.byteLength - signatureLength - DIGEST_LENGTH[encodedFrame.type] - counterLength - 1,
+                        data.byteLength - 1 - this._signatureOptions.byteLength - counterLength - 1);
                     const signature = data.subarray(data.byteLength - signatureLength, data.byteLength - 1);
                     const validSignature = await crypto.subtle.verify(this._signatureOptions,
                             this._signatureKey, signature, signatureData);

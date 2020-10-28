@@ -330,15 +330,22 @@ describe('E2EE Context', () => {
                     await receiver.decodeFunction(encodedFrame, receiveController);
                 }
             };
+            let frameCount = 0;
+
             receiveController = {
                 enqueue: encodedFrame => {
+                    frameCount++;
                     const data = new Uint8Array(encodedFrame.data);
 
                     expect(data.byteLength).toEqual(audioBytes.length);
                     expect(Array.from(data)).toEqual(audioBytes);
-                    done();
+                    if (frameCount === 2) {
+                        done();
+                    }
                 }
             };
+            await sender.encodeFunction(makeAudioFrame(), sendController);
+            sender._sendCount = 65537n;
             await sender.encodeFunction(makeAudioFrame(), sendController);
         });
     });
