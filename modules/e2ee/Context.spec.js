@@ -351,29 +351,35 @@ describe('E2EE Context', () => {
         });
 
         it('verifies the subsequent frame', async done => {
-            let frameCount = 0;
+            let signedFrameCount = 0;
 
             sendController = {
                 enqueue: async encodedFrame => {
+                    const data = new Uint8Array(encodedFrame.data);
+
+                    if ((data[data.byteLength - 1] & 0x80) === 0x80) {
+                        signedFrameCount++;
+                    }
                     await receiver.decodeFunction(encodedFrame, receiveController);
                 }
             };
             receiveController = {
                 enqueue: encodedFrame => {
-                    frameCount++;
                     const data = new Uint8Array(encodedFrame.data);
 
                     expect(data.byteLength).toEqual(audioBytes.length);
                     expect(Array.from(data)).toEqual(audioBytes);
-                    if (frameCount === 4) {
+
+                    if (signedFrameCount === 2) {
                         done();
                     }
                 }
             };
-            await sender.encodeFunction(makeAudioFrame(), sendController);
-            await sender.encodeFunction(makeAudioFrame(), sendController);
-            await sender.encodeFunction(makeAudioFrame(), sendController);
-            await sender.encodeFunction(makeAudioFrame(), sendController);
+
+            // Send frames until we hit the second signed one.
+            while (signedFrameCount !== 2) { // eslint-disable-line no-unmodified-loop-condition
+                await sender.encodeFunction(makeAudioFrame(), sendController);
+            }
         });
     });
 });
