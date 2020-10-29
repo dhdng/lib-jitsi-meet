@@ -1,4 +1,5 @@
 /* eslint-disable no-bitwise */
+/* global BigInt */
 import { Context } from './Context';
 import { ratchet, importKey } from './crypto-utils';
 
@@ -346,7 +347,7 @@ describe('E2EE Context', () => {
                 }
             };
             await sender.encodeFunction(makeAudioFrame(), sendController);
-            sender._sendCount = 65537n;
+            sender._sendCount = BigInt(65537); // eslint-disable-line new-cap
             await sender.encodeFunction(makeAudioFrame(), sendController);
         });
 
