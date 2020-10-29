@@ -325,12 +325,13 @@ describe('E2EE Context', () => {
         });
 
         it('verifies the frame', async done => {
+            let frameCount = 0;
+
             sendController = {
                 enqueue: async encodedFrame => {
                     await receiver.decodeFunction(encodedFrame, receiveController);
                 }
             };
-            let frameCount = 0;
 
             receiveController = {
                 enqueue: encodedFrame => {
@@ -346,6 +347,32 @@ describe('E2EE Context', () => {
             };
             await sender.encodeFunction(makeAudioFrame(), sendController);
             sender._sendCount = 65537n;
+            await sender.encodeFunction(makeAudioFrame(), sendController);
+        });
+
+        it('verifies the subsequent frame', async done => {
+            let frameCount = 0;
+
+            sendController = {
+                enqueue: async encodedFrame => {
+                    await receiver.decodeFunction(encodedFrame, receiveController);
+                }
+            };
+            receiveController = {
+                enqueue: encodedFrame => {
+                    frameCount++;
+                    const data = new Uint8Array(encodedFrame.data);
+
+                    expect(data.byteLength).toEqual(audioBytes.length);
+                    expect(Array.from(data)).toEqual(audioBytes);
+                    if (frameCount === 4) {
+                        done();
+                    }
+                }
+            };
+            await sender.encodeFunction(makeAudioFrame(), sendController);
+            await sender.encodeFunction(makeAudioFrame(), sendController);
+            await sender.encodeFunction(makeAudioFrame(), sendController);
             await sender.encodeFunction(makeAudioFrame(), sendController);
         });
     });

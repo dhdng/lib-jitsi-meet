@@ -140,7 +140,7 @@ export class Context {
         }
 
         // TODO: variable for audio and video?
-        return this._frameSignatures.get(ssrc).length > 30;
+        return this._frameSignatures.get(ssrc).length >= 2;
     }
 
     /**
@@ -194,7 +194,6 @@ export class Context {
                 }
             }
 
-
             // If a signature is included, the S bit is set and a fixed number
             // of bytes (depending on the signature algorithm) is inserted between
             // CTR and the trailing byte.
@@ -205,7 +204,7 @@ export class Context {
 
             const frameTrailer = new Uint8Array(counterLength + signatureLength + 1);
 
-            frameTrailer.set(new Uint8Array(counter.buffer, counter.byteLength - counterLength));
+            frameTrailer.set(new Uint8Array(counter.buffer, counter.byteLength - counterLength), frameTrailer.byteLength - (1 + (signatureLength ? this._signatureOptions.byteLength : 0) + counterLength));
 
             // Since we never send a counter of 0 we send counterLength - 1 on the wire.
             // This is different from the sframe draft, increases the key space and lets us
@@ -244,7 +243,6 @@ export class Context {
                     new Uint8Array(newData)).then(async authTag => {
                     const truncatedAuthTag = new Uint8Array(authTag, 0, DIGEST_LENGTH[encodedFrame.type]);
 
-
                     // Set the truncated authentication tag.
                     newUint8.set(truncatedAuthTag, UNENCRYPTED_BYTES[encodedFrame.type] + cipherText.byteLength);
 
@@ -272,7 +270,7 @@ export class Context {
                         newUint8.set(new Uint8Array(signature), newUint8.byteLength - signature.byteLength - 1);
 
                         // This count excludes the new authentication tag (which is always there)
-                        newUint8[newUint8.byteLength - signature.byteLength - counterLength - 1] = numberOfOldTags;
+                        newUint8[newUint8.byteLength - 1 - this._signatureOptions.byteLength - counterLength - 1] = numberOfOldTags;
 
                         // Effectively we overwrite the truncated authentication tag with itself.
                         newUint8.set(signatureData, UNENCRYPTED_BYTES[encodedFrame.type] + cipherText.byteLength);
@@ -314,25 +312,31 @@ export class Context {
         if (this._cryptoKeyRing[keyIndex]) {
             const counterLength = 1 + ((data[encodedFrame.data.byteLength - 1] >> 4) & 0x7);
             const signatureLength = data[encodedFrame.data.byteLength - 1] & 0x80
-                ? this._signatureOptions.byteLength + 1
-                    + (data[encodedFrame.data.byteLength - this._signatureOptions.byteLength - counterLength - 1]
-                        * DIGEST_LENGTH[encodedFrame.type])
-                : 0;
+                ? this._signatureOptions.byteLength + 1 : 0;
             const frameHeader = new Uint8Array(encodedFrame.data, 0, UNENCRYPTED_BYTES[encodedFrame.type]);
 
-            // Extract the truncated authentication tag.
-            const authTagOffset = encodedFrame.data.byteLength - (DIGEST_LENGTH[encodedFrame.type]
-                + counterLength + signatureLength + 1);
+            // Extract the truncated authentication tag. The position depends on whether we have a signature.
+            let authTagOffset;
+            if (signatureLength === 0) {
+                authTagOffset = encodedFrame.data.byteLength - (DIGEST_LENGTH[encodedFrame.type]
+                    + counterLength + signatureLength + 1);
+            } else {
+                const numberOfOldTags = data[data.byteLength - 1 - this._signatureOptions.byteLength - counterLength - 1];
+                authTagOffset = encodedFrame.data.byteLength - (DIGEST_LENGTH[encodedFrame.type] * (numberOfOldTags + 1)
+                    + counterLength + signatureLength + 1);
+            }
             const authTag = encodedFrame.data.slice(authTagOffset, authTagOffset
                 + DIGEST_LENGTH[encodedFrame.type]);
 
             // Verify the long-term signature of the authentication tag.
             if (signatureLength) {
+                const numberOfOldTags = data[data.byteLength - 1 - this._signatureOptions.byteLength - counterLength - 1];
+                // Signature data is the data that is signed, i.e. the authentication tags.
+                const signatureData = data.subarray(
+                    data.byteLength - 1 - this._signatureOptions.byteLength - counterLength - 1 - DIGEST_LENGTH[encodedFrame.type] * (numberOfOldTags + 1),
+                    data.byteLength - 1 - this._signatureOptions.byteLength - counterLength - 1);
+                const signature = data.subarray(data.byteLength - (signatureLength - 1) - 1, data.byteLength - 1);
                 if (this._signatureKey) {
-                    const signatureData = data.subarray(
-                        data.byteLength - signatureLength - DIGEST_LENGTH[encodedFrame.type] - counterLength - 1,
-                        data.byteLength - 1 - this._signatureOptions.byteLength - counterLength - 1);
-                    const signature = data.subarray(data.byteLength - signatureLength, data.byteLength - 1);
                     const validSignature = await crypto.subtle.verify(this._signatureOptions,
                             this._signatureKey, signature, signatureData);
 
@@ -349,12 +353,18 @@ export class Context {
                 }
 
                 // Then set signature bytes to 0.
-                data.set(new Uint8Array(signatureLength), encodedFrame.data.byteLength - (signatureLength + 1));
-            }
+                data.set(new Uint8Array(this._signatureOptions.byteLength), encodedFrame.data.byteLength - (this._signatureOptions.byteLength + 1));
 
-            // Set authentication tag bytes to 0.
-            data.set(new Uint8Array(DIGEST_LENGTH[encodedFrame.type]), encodedFrame.data.byteLength
-                - (DIGEST_LENGTH[encodedFrame.type] + counterLength + signatureLength + 1));
+                // Set the number of tags to 0.
+                data[data.byteLength - 1 - this._signatureOptions.byteLength - counterLength - 1] = 0x00;
+
+                // Set the old authentication tags and the current one to 0.
+                data.set(new Uint8Array(signatureData.byteLength), data.byteLength - 1 - this._signatureOptions.byteLength - counterLength - 1 - DIGEST_LENGTH[encodedFrame.type] * (numberOfOldTags + 1));
+            } else {
+                // Set authentication tag bytes to 0.
+                data.set(new Uint8Array(DIGEST_LENGTH[encodedFrame.type]), encodedFrame.data.byteLength
+                    - (DIGEST_LENGTH[encodedFrame.type] + counterLength + signatureLength + 1));
+            }
 
             // Do truncated hash comparison of the authentication tag.
             // If the hash does not match we might have to advance the ratchet a limited number
@@ -395,8 +405,8 @@ export class Context {
             // Extract the counter.
             const counter = new Uint8Array(16);
 
-            counter.set(data.slice(encodedFrame.data.byteLength - (counterLength + signatureLength + 1),
-                encodedFrame.data.byteLength - (signatureLength + 1)), 16 - counterLength);
+            counter.set(data.slice(encodedFrame.data.byteLength - (counterLength + (signatureLength ? this._signatureOptions.byteLength : 0) + 1),
+                encodedFrame.data.byteLength - ((signatureLength ? this._signatureOptions.byteLength : 0) + 1)), 16 - counterLength);
             const counterView = new DataView(counter.buffer);
 
             // XOR the counter with the saltKey to construct the AES CTR.
@@ -412,9 +422,7 @@ export class Context {
                 counter,
                 length: CTR_LENGTH
             }, this._cryptoKeyRing[keyIndex].encryptionKey, new Uint8Array(encodedFrame.data,
-                    UNENCRYPTED_BYTES[encodedFrame.type],
-                    encodedFrame.data.byteLength - (UNENCRYPTED_BYTES[encodedFrame.type]
-                    + DIGEST_LENGTH[encodedFrame.type] + counterLength + signatureLength + 1))
+                    UNENCRYPTED_BYTES[encodedFrame.type], authTagOffset - UNENCRYPTED_BYTES[encodedFrame.type])
             ).then(plainText => {
                 const newData = new ArrayBuffer(UNENCRYPTED_BYTES[encodedFrame.type] + plainText.byteLength);
                 const newUint8 = new Uint8Array(newData);
