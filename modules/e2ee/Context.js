@@ -70,6 +70,12 @@ export class Context {
 
         this._signatureKey = null;
         this._signatureOptions = null;
+
+        // A per-ssrc map of frame signatures that are either
+        // - sent but not signed
+        // - received but not verified
+        // TODO: rename to pendingAuthenticationTags? This is not
+        // signatures but auth tags.
         this._frameSignatures = new Map();
     }
 
@@ -310,6 +316,7 @@ export class Context {
      * @param {TransformStreamDefaultController} controller - TransportStreamController.
      */
     async decodeFunction(encodedFrame, controller) {
+        const ssrc = encodedFrame.getMetadata().synchronizationSource;
         const data = new Uint8Array(encodedFrame.data);
         const keyIndex = data[encodedFrame.data.byteLength - 1] & 0xf; // lower four bits.
 
@@ -360,6 +367,49 @@ export class Context {
                     }
 
                     // TODO: surface this to the app. We are now encrypted and verified.
+                    console.log('GOT A SIGNED FRAME', encodedFrame.type || 'audio');
+
+                    // Split the signature data into individual frame signatures, then compare
+                    // that list to the pending signatures.
+                    // Note that keyframes (which are always signed) invalidate the list as we
+                    // might have switched simulcast streams in an SFU so won't receive a signature for
+                    // the previous spatial layer.
+                    if (encodedFrame.type === 'key') {
+                        // TODO: do we need to check the authentication tag on the keyframe?
+                        //  It is signed but at this point we do not know whether the authentication tag is valid.
+                        //  This might mean this whole block has to move after that point?
+                        this._frameSignatures.set(ssrc, []);
+                    } else {
+                        const pendingSignatures = this._frameSignatures.get(ssrc) || [];
+
+                        console.log('PENDING', pendingSignatures);
+
+                        // Skip the current authentication tag.
+                        for (let offset = DIGEST_LENGTH[encodedFrame.type]; offset < signatureData.byteLength;
+                            offset += DIGEST_LENGTH[encodedFrame.type]) {
+                            const previousTag = signatureData.subarray(offset, offset
+                                + DIGEST_LENGTH[encodedFrame.type]);
+                            const pendingIndex = pendingSignatures.findIndex(
+                                pendingTag => isArrayEqual(pendingTag, previousTag));
+
+                            if (pendingIndex > -1) {
+                                pendingSignatures.splice(pendingIndex, 1);
+                            }
+                        }
+
+                        // The frames we got will be a subset of the the frames signed.
+                        // So we remove all the frames signed from the set and should ideally end up
+                        // with an empty set.
+                        // If there are too many frames without a valid signature we raise an error.
+                        // See the first paragraph of NIST Special Publication 800-38D
+                        // Appendix C:  Requirements and Guidelines for Using Short Tags
+                        // for the rationale.
+                        console.log('still pending', pendingSignatures);
+
+                        // TODO: when do we clear pendingSignatures? Now? Rotate to an old buffer?
+                        //  Remove over a certain age?
+                        this._frameSignatures.set(ssrc, pendingSignatures);
+                    }
                 } else {
                     // TODO: surface this to the app. We are now encrypted but can not verify.
                 }
@@ -376,6 +426,12 @@ export class Context {
                     - this._signatureOptions.byteLength - counterLength - 1
                     - (DIGEST_LENGTH[encodedFrame.type] * (numberOfOldTags + 1)));
             } else {
+                if (encodedFrame.type === 'key') {
+                    console.error('Got a key frame without signature, rejecting.');
+
+                    return;
+                }
+
                 // Set authentication tag bytes to 0.
                 data.set(new Uint8Array(DIGEST_LENGTH[encodedFrame.type]), encodedFrame.data.byteLength
                     - (DIGEST_LENGTH[encodedFrame.type] + counterLength + signatureLength + 1));
@@ -393,6 +449,8 @@ export class Context {
                 const calculatedTag = await crypto.subtle.sign(AUTHENTICATIONTAG_OPTIONS,
                     authenticationKey, encodedFrame.data);
 
+                // While we ask the sender to sign when ratcheting forward there is no guarantee
+                // that we receive the signed frame first.
                 if (isArrayEqual(new Uint8Array(authTag),
                         new Uint8Array(calculatedTag.slice(0, DIGEST_LENGTH[encodedFrame.type])))) {
                     validAuthTag = true;
@@ -415,6 +473,15 @@ export class Context {
                 console.error('Authentication tag mismatch');
 
                 return;
+            }
+
+            // If the auth tag is valid (and we did not receive a signature with this frame)
+            // push it to the list of frame signatures we need to verify.
+            if (!signatureLength) {
+                if (!this._frameSignatures.has(ssrc)) {
+                    this._frameSignatures.set(ssrc, []);
+                }
+                this._frameSignatures.get(ssrc).push(new Uint8Array(authTag));
             }
 
             // Extract the counter.

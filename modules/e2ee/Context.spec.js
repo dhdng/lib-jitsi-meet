@@ -371,14 +371,14 @@ describe('E2EE Context', () => {
                     expect(data.byteLength).toEqual(audioBytes.length);
                     expect(Array.from(data)).toEqual(audioBytes);
 
-                    if (signedFrameCount === 2) {
+                    if (signedFrameCount === 3) {
                         done();
                     }
                 }
             };
 
             // Send frames until we hit the second signed one.
-            while (signedFrameCount !== 2) { // eslint-disable-line no-unmodified-loop-condition
+            while (signedFrameCount !== 3) { // eslint-disable-line no-unmodified-loop-condition
                 await sender.encodeFunction(makeAudioFrame(), sendController);
             }
         });
